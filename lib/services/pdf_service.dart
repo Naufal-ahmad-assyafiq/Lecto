@@ -1,0 +1,251 @@
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+
+import '../models/history.dart';
+import '../models/schedule.dart';
+import '../core/constants/time_slots.dart';
+
+/// Service untuk mengekspor jadwal ke PDF
+/// Format: Landscape A4, berwarna, header & footer Lecto
+class PdfService {
+  PdfService._();
+  static final PdfService instance = PdfService._();
+
+  // Palet warna schedule (harus sinkron dengan AppColors.scheduleColors)
+  static const List<PdfColor> _scheduleColors = [
+    PdfColor.fromInt(0xFFCCFF00), // Neon Lime
+    PdfColor.fromInt(0xFF00D4FF), // Electric Blue
+    PdfColor.fromInt(0xFF9B59FF), // Purple
+    PdfColor.fromInt(0xFFFF6B00), // Orange
+    PdfColor.fromInt(0xFFFF2D78), // Pink
+    PdfColor.fromInt(0xFF00FFCC), // Cyan
+    PdfColor.fromInt(0xFFFF4444), // Red
+  ];
+
+  static PdfColor _scheduleColorAt(int index) =>
+      _scheduleColors[index % _scheduleColors.length];
+
+  /// Membuka dialog share/print PDF
+  Future<void> exportHistory(History history) async {
+    final pdf = await _buildPdf(history.schedules, history.generatedAt);
+    await Printing.layoutPdf(
+      onLayout: (format) async => pdf.save(),
+      name: 'Jadwal_Lecto_${_formatFileName(history.generatedAt)}.pdf',
+    );
+  }
+
+  /// Simpan PDF ke bytes (untuk share manual)
+  Future<Uint8List> exportToBytes(History history) async {
+    final pdf = await _buildPdf(history.schedules, history.generatedAt);
+    return pdf.save();
+  }
+
+  // ─── Build PDF ────────────────────────────────────────────────────────
+
+  Future<pw.Document> _buildPdf(
+    List<Schedule> schedules,
+    DateTime generatedAt,
+  ) async {
+    final pdf = pw.Document();
+
+    // Load font (fallback ke built-in jika gagal)
+    pw.Font? baseFont;
+    pw.Font? boldFont;
+    try {
+      baseFont = await PdfGoogleFonts.spaceGroteskRegular();
+      boldFont = await PdfGoogleFonts.spaceGroteskBold();
+    } catch (_) {
+      baseFont = pw.Font.helvetica();
+      boldFont = pw.Font.helveticaBold();
+    }
+
+    final ttBase = pw.TextStyle(font: baseFont, fontSize: 9);
+    final ttBold = pw.TextStyle(
+        font: boldFont, fontSize: 9, fontWeight: pw.FontWeight.bold);
+    final ttHeader = pw.TextStyle(
+        font: boldFont, fontSize: 11, fontWeight: pw.FontWeight.bold);
+
+    // Urutkan jadwal berdasarkan hari → jam
+    final sortedSchedules = List<Schedule>.from(schedules)
+      ..sort((a, b) {
+        final dayOrder = TimeSlots.activeDays.indexOf(a.day) -
+            TimeSlots.activeDays.indexOf(b.day);
+        if (dayOrder != 0) return dayOrder;
+        return a.startTime.compareTo(b.startTime);
+      });
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(24),
+        header: (ctx) => _buildHeader(boldFont!, ttHeader, ttBase, generatedAt),
+        footer: (ctx) => _buildFooter(baseFont!, ttBase, ctx, generatedAt),
+        build: (ctx) => [
+          pw.SizedBox(height: 12),
+          _buildTable(sortedSchedules, ttBase, ttBold),
+        ],
+      ),
+    );
+
+    return pdf;
+  }
+
+  // ─── Header ───────────────────────────────────────────────────────────
+
+  pw.Widget _buildHeader(
+    pw.Font boldFont,
+    pw.TextStyle ttHeader,
+    pw.TextStyle ttBase,
+    DateTime generatedAt,
+  ) {
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text('LECTO',
+                    style: ttHeader.copyWith(
+                      fontSize: 20,
+                      color: const PdfColor.fromInt(0xFF0A0A0A),
+                    )),
+                pw.Text('Automatic Lecturer Scheduling System',
+                    style: ttBase.copyWith(
+                      color: const PdfColor.fromInt(0xFF555555),
+                    )),
+              ],
+            ),
+            pw.Text(
+              'Dicetak: ${_formatDate(generatedAt)}',
+              style: ttBase.copyWith(color: const PdfColor.fromInt(0xFF555555)),
+            ),
+          ],
+        ),
+        pw.Divider(thickness: 2, color: const PdfColor.fromInt(0xFF0A0A0A)),
+        pw.SizedBox(height: 4),
+      ],
+    );
+  }
+
+  // ─── Footer ───────────────────────────────────────────────────────────
+
+  pw.Widget _buildFooter(
+    pw.Font baseFont,
+    pw.TextStyle ttBase,
+    pw.Context ctx,
+    DateTime generatedAt,
+  ) {
+    return pw.Column(
+      children: [
+        pw.Divider(thickness: 1, color: const PdfColor.fromInt(0xFFCCCCCC)),
+        pw.SizedBox(height: 4),
+        pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text('Generated by Lecto — ${_formatDate(generatedAt)}',
+                style: ttBase.copyWith(
+                    color: const PdfColor.fromInt(0xFF888888), fontSize: 8)),
+            pw.Text('Halaman ${ctx.pageNumber} / ${ctx.pagesCount}',
+                style: ttBase.copyWith(
+                    color: const PdfColor.fromInt(0xFF888888), fontSize: 8)),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ─── Table ────────────────────────────────────────────────────────────
+
+  pw.Widget _buildTable(
+    List<Schedule> schedules,
+    pw.TextStyle ttBase,
+    pw.TextStyle ttBold,
+  ) {
+    const headers = [
+      'Hari',
+      'Jam',
+      'Kode MK',
+      'Nama Mata Kuliah',
+      'SKS',
+      'Semester',
+      'Program Studi',
+      'Dosen',
+      'Ruangan',
+    ];
+
+    final headerRow = pw.TableRow(
+      decoration: const pw.BoxDecoration(
+        color: PdfColor.fromInt(0xFF0A0A0A),
+      ),
+      children: headers.map((h) {
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: pw.Text(h,
+              style: ttBold.copyWith(color: PdfColors.white, fontSize: 9)),
+        );
+      }).toList(),
+    );
+
+    final dataRows = schedules.map((s) {
+      final bg = _scheduleColorAt(s.colorIndex);
+      final bgLight = PdfColor(bg.red, bg.green, bg.blue, 0.18);
+
+      final cells = [
+        s.day,
+        '${s.startTime} – ${s.endTime}',
+        s.course.courseCode,
+        s.course.courseName,
+        '${s.course.credits} SKS',
+        'Sem ${s.course.semester}',
+        s.course.programStudi,
+        s.lecturer.name,
+        s.room.roomName,
+      ];
+
+      return pw.TableRow(
+        decoration: pw.BoxDecoration(color: bgLight),
+        children: cells.map((cell) {
+          return pw.Padding(
+            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            child: pw.Text(cell,
+                style: ttBase.copyWith(
+                    color: const PdfColor.fromInt(0xFF111111))),
+          );
+        }).toList(),
+      );
+    }).toList();
+
+    return pw.Table(
+      border: pw.TableBorder.all(
+        color: const PdfColor.fromInt(0xFFDDDDDD),
+        width: 0.5,
+      ),
+      columnWidths: {
+        0: const pw.FlexColumnWidth(1.2), // Hari
+        1: const pw.FlexColumnWidth(1.8), // Jam
+        2: const pw.FlexColumnWidth(1.2), // Kode MK
+        3: const pw.FlexColumnWidth(2.8), // Nama MK
+        4: const pw.FlexColumnWidth(0.7), // SKS
+        5: const pw.FlexColumnWidth(0.9), // Semester
+        6: const pw.FlexColumnWidth(2.0), // Program Studi
+        7: const pw.FlexColumnWidth(2.2), // Dosen
+        8: const pw.FlexColumnWidth(1.4), // Ruangan
+      },
+      children: [headerRow, ...dataRows],
+    );
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────
+
+  String _formatDate(DateTime dt) =>
+      DateFormat('dd MMMM yyyy, HH:mm', 'id_ID').format(dt);
+
+  String _formatFileName(DateTime dt) =>
+      DateFormat('yyyyMMdd_HHmm').format(dt);
+}
